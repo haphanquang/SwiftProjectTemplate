@@ -1,0 +1,171 @@
+update_fastlane
+xcversion(version: "~> 13")
+
+default_platform(:ios)
+opt_out_usage
+
+platform :ios do
+  desc "Beta Build and upload to appcenter if need"
+  lane :release do |options|
+    $version = options[:version] || "1.0.0"
+    $build = options[:build] || "1"
+    $file_name = get_file_name($version, $build)
+
+    prepare($version, $build)
+    if options[:testflight]
+      make_enterprise_ipa($file_name)
+    else 
+      make_app_store_ipa($file_name)
+    end
+    clean_up()
+    
+    if options[:appcenter]
+      $group_name = options[:group] || "PublicGroup"
+      upload_to_appcenter("./exports/#{$file_name}.ipa", $group_name)
+    end
+
+    if options[:testflight]
+      upload_to_testflight(
+        ipa: "./exports/#{$file_name}.ipa", 
+        skip_submission: true,
+        skip_waiting_for_build_processing: true,
+        apple_id: "app-id-in-app-store-connect"
+      )
+    end
+  end
+
+  lane :code_quality do |options|
+    scan(
+      scheme: $build_scheme, 
+      code_coverage: true, 
+      clean: true,
+      output_types: "html,junit",
+      output_files: "TEST-report.html,TEST-report.junit",
+      fail_build: false,
+      devices: ["iPhone 13 mini"],
+    )
+    slather(
+      scheme: $build_scheme, 
+      proj: "./#{$project_id}",
+      sonarqube_xml: true,
+      output_directory: "./sonar-reports",
+      ignore: ["~/**/DerivedData/*", "../Library/Developer/*", "../../../Library/*"],
+    )
+    if options[:pr_key]
+      sonar(
+        project_configuration_path: "./sonar-project.properties",
+        pull_request_branch: git_branch,
+        pull_request_base: options[:pr_branch] || "main",
+        pull_request_key: options[:pr_key],
+      )
+    else
+      sonar(
+        project_configuration_path: "./sonar-project.properties",
+        branch_name: git_branch
+      )
+    end
+  end
+end
+
+$project_id = "ProjectXXXXX.xcodeproj"
+$bundle_id = "com.projectxxx.app.name"
+$build_target = "BuildTarget"
+$build_scheme = "BuildScheme"
+
+$team_id = "TEAMXXXXX"
+$code_sign_id = "CodeSignId"
+$provisioning_profile_name = "ProvisioningName"
+
+$appcenter_owner = "AppCenterOwer"
+$appcenter_app_name = "AppCenterName"
+$appcenter_api_key = "AppCenterTokenKey"
+
+def prepare(version, build_number)
+  puts "Preparing..."
+  ensure_git_status_clean
+  increment_version_number(version_number: version)
+  increment_build_number(build_number: build_number)
+  add_badge(shield: "#{version}(#{build_number})-blue", no_badge: true)
+
+  update_code_signing_settings(
+    use_automatic_signing: false,
+    path: $project_id,
+    team_id: $team_id,
+    code_sign_identity: $code_sign_id, 
+    profile_name: $provisioning_profile_name,
+  )
+
+  update_app_identifier(
+    plist_path: "./AppXXXXX/Info.plist",
+    app_identifier: $bundle_id
+  )
+end
+
+def get_file_name(version, build_number)
+  return "#{$build_target}-#{version}(#{build_number})"
+end
+
+def make_enterprise_ipa(file_name)
+  puts "Making IPA..."
+  gym(
+    scheme: $build_scheme,
+    export_method: "enterprise",
+    export_team_id: $team_id,
+    export_options: {
+      provisioningProfiles: {
+        $bundle_id => $provisioning_profile_name,
+      }
+    },
+    codesigning_identity: $code_sign_id,
+    clean: true,
+    output_directory: "./exports",
+    skip_build_archive: false,
+    output_name: file_name
+  )
+  puts "Exported: ./exports/#{$file_name}"
+end
+
+def make_app_store_ipa(file_name)
+  puts "Making IPA..."
+  gym(
+    scheme: $build_scheme,
+    export_method: "app-store",
+    export_team_id: $team_id,
+    export_options: {
+      provisioningProfiles: {
+        $bundle_id => $provisioning_profile_name,
+      }
+    },
+    codesigning_identity: $code_sign_id,
+    clean: true,
+    output_directory: "./exports",
+    skip_build_archive: false,
+    output_name: file_name
+  )
+  puts "Exported: ./exports/#{$file_name}"
+end
+
+def clean_up()
+  reset_git_repo(disregard_gitignore: false)
+end
+
+def upload_to_appcenter(path, group_name)
+  puts "Prepare for App Center..."
+  release_notes = make_release_notes()
+  appcenter_upload(
+    api_token: $appcenter_api_key,
+    owner_name: $appcenter_owner,
+    owner_type: "organization",
+    app_name: $appcenter_app_name,
+    ipa: path,
+    destinations: group_name,
+    release_notes: release_notes
+  )
+end
+
+def make_release_notes()
+  $branch_name = git_branch
+  $build_time = Time.now
+  $change_log = changelog_from_git_commits(between: ['HEAD^^^', 'HEAD'], pretty: '%h %s')
+  return "[#{$build_scheme}] Built at #{$build_time}\nBranch: #{$branch_name}\n\nLast commits:\n#{$change_log}"
+end

@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Set Credentials as environment Variables for Testflight upload
+        FASTLANE_USER = credentials('FASTLANE_USER')
+        FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD = credentials('FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD')
+    }
+    
+    parameters{
+        choice(name: 'LANE', choices: ['prod_appcenter', 'prod_appstore'], description: 'prod_appcenter: Production to AppCenter, prod_appstore: Production AppStore')
+        string(name: 'BRANCH', defaultValue: 'automation/fastlane-build', description: 'Git remote branch to be checked out and built')
+        string(name: 'VERSION', defaultValue: '1.0.0', description: 'Semantic version "x.x.x"')
+        string(name: 'BUILD', defaultValue: '1', description: 'Bundle build number')
+        booleanParam(name: 'UPLOAD', defaultValue: false, description: 'Upload the build to App Center(prod_appcenter) or TestFlight(prod_appstore)')
+        string(name: 'GROUP', defaultValue: 'PublicGroup', description: 'AppCenter Distribution group')
+        booleanParam(name: 'SONAR_REPORT', defaultValue: true, description: 'Scan source code and send report to SonarQube')
+        booleanParam(name: 'UNIT_TEST', defaultValue: false, description: 'Only can run on Real device, please specify test target device name')
+        string(name: 'UT_TARGET_DEVICE', defaultValue: '', description: 'Target test device, skip if not run UT')
+    }
+    
+    stages {
+        stage("Prepare") {
+            steps {
+                script {
+                    currentBuild.displayName = "#${env.BUILD_NUMBER}-${params.BRANCH}(${params.LANE})"
+                    currentBuild.description = "App Version: ${params.VERSION}(${params.BUILD})"
+                }
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                git(branch: "${params.BRANCH}", url: 'git-ssh-url')
+            }
+        }
+    
+        stage('Install Dependencies') {
+            steps {
+                sh """
+                gem install bundler
+                bundle install
+                """
+            }
+        }
+        
+        stage('Build / Deploy with Fastlane') {
+            steps {
+                sh """
+                git checkout .
+                bundle exec fastlane ios ${params.LANE} version:${params.VERSION} build:${params.BUILD} upload:${params.UPLOAD} group:${params.GROUP}
+                """
+            }
+        }
+        
+        stage('Test and Report') {
+            steps {
+                script {
+                    writeFile file: 'sonar-reports/sonarqube-generic-coverage.xml', text: '<?xml version="1.0"?><coverage version="1"></coverage>'
+                    if (params.SONAR_REPORT && params.UNIT_TEST) {
+                        sh """
+                        bundle exec fastlane ios code_quality test_target_device:'${params.UT_TARGET_DEVICE}'
+                        """
+                        return
+                    }
+                    if (params.SONAR_REPORT) {
+                        sh 'bundle exec fastlane ios code_quality'
+                        return
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            archiveArtifacts artifacts: "build/**/*.*", fingerprint: true
+            cleanWs()
+        }
+    }
+}
